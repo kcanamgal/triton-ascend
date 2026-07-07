@@ -159,7 +159,7 @@ std::pair<mlir::Operation *, mlir::Operation *> InterCoreTransferAndSyncPass::ge
 }
 
 bool InterCoreTransferAndSyncPass::isOuterLayerDependency(size_t depIndex, mlir::Operation *currProdEnd,
-    mlir::Operation *currConsStart, llvm::SmallVector<DependencyInfo> &memDependencies)
+    mlir::Operation *currConsStart, llvm::SmallVector<DependencyInfo> &memDependencies, CVPipeline::ComputeBlockIdManager &bm)
 {
     if (!currProdEnd || !currConsStart) {
         return false;
@@ -178,8 +178,8 @@ bool InterCoreTransferAndSyncPass::isOuterLayerDependency(size_t depIndex, mlir:
             continue;
         }
 
-        auto [otherProdStart, otherProdEnd] = getBlockStartEnd(otherDep.producerBlockId, module);
-        auto [otherConsStart, otherConsEnd] = getBlockStartEnd(otherDep.consumerBlockId, module);
+        auto [otherProdStart, otherProdEnd] = getBlockStartEnd(otherDep.producerBlockId, module, bm);
+        auto [otherConsStart, otherConsEnd] = getBlockStartEnd(otherDep.consumerBlockId, module, bm);
 
         if (!otherProdEnd || !otherConsStart) {
             continue;
