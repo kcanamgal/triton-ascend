@@ -58,6 +58,11 @@ class PatternMatchRewritePass : public PassWrapper<PatternMatchRewritePass, Oper
 
 std::unique_ptr<OperationPass<ModuleOp>> createPatternMatchRewritePass();
 
+// Applies the StandardizeOp rewrite patterns (SplitMatmulPattern) to the module.
+// Shared by PatternMatchRewritePass and StandardizeOpPass so the latter can run
+// the rewrites directly instead of through a nested PassManager.
+llvm::LogicalResult runStandardizeOpRewrites(ModuleOp moduleOp);
+
 } // namespace mlir::triton::CVSplit
 
 #endif // TRITON_ADAPTER_DYNAMIC_CVPIPELINE_PATTERN_MATCH_REWRITES_H

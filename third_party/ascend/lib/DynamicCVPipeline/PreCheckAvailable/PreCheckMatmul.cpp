@@ -35,9 +35,11 @@ static constexpr const char *DEBUG_TYPE = "pre-check-matmul";
 #define DBGS() (llvm::dbgs() << '[' << DEBUG_TYPE << "] ")
 #define LDBG(X) LLVM_DEBUG(DBGS() << (X) << "\n")
 
-void PreCheckMatmul::runOnOperation()
+namespace mlir {
+namespace triton {
+
+llvm::LogicalResult runPreCheckMatmul(ModuleOp module)
 {
-    ModuleOp module = getOperation();
     linalg::MatmulOp firstMatmulOp = nullptr;
 
     module.walk([&](linalg::MatmulOp matmulOp) -> WalkResult {
@@ -47,16 +49,20 @@ void PreCheckMatmul::runOnOperation()
 
     if (firstMatmulOp) {
         LDBG("The linalg.matmul operation is found, passed.");
-        return;
+        return llvm::success();
     }
 
     LDBG("SSBUFFER will be skipped because no linalg.matmul operation was found, "
         "which indicating that this op is a pure vector computation.");
-    signalPassFailure();
+    return llvm::failure();
 }
 
-namespace mlir {
-namespace triton {
+void PreCheckMatmul::runOnOperation()
+{
+    if (llvm::failed(runPreCheckMatmul(getOperation()))) {
+        signalPassFailure();
+    }
+}
 
 std::unique_ptr<OperationPass<ModuleOp>> createPreCheckMatmulPass()
 {

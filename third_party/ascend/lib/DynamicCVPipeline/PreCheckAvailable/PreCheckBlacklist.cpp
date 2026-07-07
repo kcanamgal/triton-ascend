@@ -20,6 +20,7 @@
  * THE SOFTWARE.
  */
 
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Debug.h"
 
 #include "bishengir/Dialect/Scope/IR/Scope.h"
@@ -45,14 +46,11 @@ static constexpr const char *DEBUG_TYPE = "pre-check-blacklist";
     llvm::dbgs() << __VA_ARGS__ << "\n";\
 })
 
-void PreCheckBlacklistPass::getDependentDialects(DialectRegistry &registry) const
-{
-    registry.insert<scope::ScopeDialect>();
-}
+namespace mlir {
+namespace triton {
 
-void PreCheckBlacklistPass::runOnOperation()
+llvm::LogicalResult runPreCheckBlacklist(ModuleOp module)
 {
-    ModuleOp module = getOperation();
     Operation *foundBlacklistOp = nullptr;
     llvm::StringRef foundOpName;
 
@@ -69,16 +67,25 @@ void PreCheckBlacklistPass::runOnOperation()
 
     if (!foundBlacklistOp) {
         LDBG("No blacklist operations found, passed.");
-        return;
+        return llvm::success();
     }
 
     LDBG("SSBUFFER will be skipped because " << foundOpName
         << " operation was found, which indicates that it has been optimized for the Ascend.");
-    signalPassFailure();
+    return llvm::failure();
 }
 
-namespace mlir {
-namespace triton {
+void PreCheckBlacklistPass::getDependentDialects(DialectRegistry &registry) const
+{
+    registry.insert<scope::ScopeDialect>();
+}
+
+void PreCheckBlacklistPass::runOnOperation()
+{
+    if (llvm::failed(runPreCheckBlacklist(getOperation()))) {
+        signalPassFailure();
+    }
+}
 
 std::unique_ptr<OperationPass<ModuleOp>> createPreCheckBlacklistPass()
 {
