@@ -335,6 +335,9 @@ class MergeComputeBlockPass : public PassWrapper<MergeComputeBlockPass, Operatio
 
     void runOnOperation() override
     {
+        if (!CVPipeline::isMergeComputeBlockEnabled()) {
+            return;
+        }
         ModuleOp module = getOperation();
         LOG_DEBUG("Before: " << *module);
 
