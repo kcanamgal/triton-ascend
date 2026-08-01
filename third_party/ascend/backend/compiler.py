@@ -225,7 +225,7 @@ def ttir_to_linalg(mod, metadata, opt, *, named_ops=False):
             metadata["disable_auto_inject_block_sync"] = True
             ascend.passes.ttir.set_enable_cube_block_merge(metadata["enable_cube_block_merge"])
             ascend.passes.ttir.set_enable_ub_refine_opt(mod, metadata["enable_ub_refine_opt"])
-            ascend.passes.ttir.set_enable_merge_compute_block(mod, metadata["enable_merge_compute_block"])
+            ascend.passes.ttir.set_enable_merge_compute_block(metadata["enable_merge_compute_block"])
 
             # Must run before add_dynamic_cv_pipeline because the driven
             # AddMultiBufferInnerScope pass reads the module-level
