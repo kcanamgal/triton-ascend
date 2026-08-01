@@ -404,7 +404,7 @@ void init_triton_ascend_passes_ttir(py::module &&m) {
       moduleop->setAttr(CVPipeline::kInsertionOptimization, builder.getUnitAttr());
     }
   });
-  m.def("enable_merge_compute_block", [](bool enable) {
+  m.def("set_enable_merge_compute_block", [](bool enable) {
     mlir::CVPipeline::setEnableMergeComputeBlock(enable);
   });
 
