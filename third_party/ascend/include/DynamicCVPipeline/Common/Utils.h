@@ -22,11 +22,13 @@
 
 #ifndef ADD_AUTO_SCHEDULING_COMMON_UTILS_H
 #define ADD_AUTO_SCHEDULING_COMMON_UTILS_H
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Value.h"
 #include "llvm/ADT/StringRef.h"
+#include <cstdint>
 #include <optional>
 #include <string_view>
 
@@ -242,6 +244,9 @@ std::optional<int> getTightlyCoupledBufferId(Value allocVal);
 // such cast is found.
 Value traceBackToMemrefAlloc(Value v);
 int getLoopCarriedArgIndex(Value operand, Block *block);
+bool allResultHasOneUser(Operation *op);
+
+int64_t getBTSizeFromValidBroadcastOp(linalg::BroadcastOp broadcastOp);
 
 } // namespace CVPipeline
 } // namespace mlir
