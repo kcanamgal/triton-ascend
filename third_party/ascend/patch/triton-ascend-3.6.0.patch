@@ -699,7 +699,7 @@ index 39e6c4dfb..c72ca65c2 100644
 +    def format_line_delim(self, keyword):
 +        return f"///------------------{keyword}------------------\n"
 diff --git a/python/triton/language/math.py b/python/triton/language/math.py
-index 7d1d65b21..13ff1cef0 100644
+index 582cd876cb..13ff1cef09 100644
 --- a/python/triton/language/math.py
 +++ b/python/triton/language/math.py
 @@ -21,8 +21,12 @@ def _check_dtype(dtypes: List[str]) -> T:
@@ -717,6 +717,15 @@ index 7d1d65b21..13ff1cef0 100644
              return fn(*args, **kwargs)
  
          return check
+@@ -92,7 +96,7 @@ def umulhi(x, y, _semantic=None):
+ 
+ 
+ @core.builtin
+-@_check_dtype(dtypes=["fp32", "fp64"])
++@_check_dtype(dtypes=["fp16", "fp32", "fp64"])
+ @_add_math_1arg_docstr("exponential")
+ @core._tensor_member_fn
+ def exp(x, _semantic=None):
 diff --git a/python/triton/language/semantic.py b/python/triton/language/semantic.py
 index 52192cf3e..8a2934e07 100644
 --- a/python/triton/language/semantic.py
