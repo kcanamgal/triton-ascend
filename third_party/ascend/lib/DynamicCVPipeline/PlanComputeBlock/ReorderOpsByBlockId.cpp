@@ -51,6 +51,8 @@
 #include "ascend/include/DynamicCVPipeline/PlanComputeBlock/Common.h"
 #include "ascend/include/DynamicCVPipeline/PlanComputeBlock/ComputeBlockIdManager.h"
 #include "ascend/include/DynamicCVPipeline/PlanComputeBlock/ReorderOpsByBlockId.h"
+#include "bishengir/Dialect/HIVM/IR/HIVMImpl.h"
+#include "bishengir/Dialect/HIVM/Utils/Utils.h"
 
 using namespace mlir;
 static constexpr const char *DEBUG_TYPE = "ReorderOpsByBlockIdPass";
@@ -310,11 +312,13 @@ GroupAdjacencyGraph::computeTopologicalOrder() {
     }
   }
 
-  LOG_DEBUG("Group order: ");
-  for (int id : result) {
-    LOG_DEBUG(id << " ");
-  }
-  LOG_DEBUG("\n");
+  LLVM_DEBUG({
+    LOG_DEBUG("Group order: ");
+    for (int id : result) {
+      LOG_DEBUG(id << " ");
+    }
+    LOG_DEBUG("\n");
+  });
 
   if (result.size() == n) {
     return result;

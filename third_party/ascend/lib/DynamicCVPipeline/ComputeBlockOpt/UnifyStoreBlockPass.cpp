@@ -343,7 +343,8 @@ public:
         //          Now we want to fuse D to A, so clone C' scalarOps for
         //          D dependencies to avoid cycle.
         LOG_DEBUG("Producer op = " << *matchedOps[0]);
-        CVPipeline::cloneScalarOpsForCrossBlockUses(bm, matchedOps);
+        CVPipeline::cloneScalarOpsForCrossBlockUses(
+            bm, matchedOps, bm.getBlockIdByOp(matchedOps[0]));
         // Phase 3: for each pattern, cycle detection + block_id update.
         //          Rebuild bm because cloning may have added new ops.
         if (!applyStoreUnify(matchedOps, memGraph, bm)) {
