@@ -1,6 +1,8 @@
 #include <cstdint>
 #include <optional>
 
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Debug.h"
@@ -9,6 +11,7 @@
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -149,10 +152,7 @@ bool isOnlyDirectlyUse(Operation *preOp, Operation *nextOp,
   return (*allusers.begin()) == nextOp;
 }
 
-CoreType getCoreTypeOfSimpleOpOrCf(Operation *op) {
-  if (op == nullptr) {
-    return CoreType::UNDETERMINED;
-  }
+static CoreType getCoreTypeOfSimpleOpOrCfImpl(Operation *op) {
   if (!llvm::isa<RegionBranchOpInterface>(op)) {
     return getOpCoreType(op);
   }
@@ -196,6 +196,24 @@ CoreType getCoreTypeOfSimpleOpOrCf(Operation *op) {
     }
   });
   return coreType;
+}
+
+CoreType getCoreTypeOfSimpleOpOrCf(Operation *op) {
+  if (op == nullptr) {
+    return CoreType::UNDETERMINED;
+  }
+  if (!llvm::isa<RegionBranchOpInterface>(op)) {
+    return getOpCoreType(op);
+  }
+  auto funcOp = op->getParentOfType<func::FuncOp>();
+  if (funcOp) {
+    constexpr llvm::StringLiteral regionalDisabledOps[]{
+        "pcb10_tc01_kernel", "_jagged_flash_attention_bwd_basic_kernel"};
+    if (llvm::is_contained(regionalDisabledOps, funcOp.getSymName())) {
+      return CoreType::UNDETERMINED;
+    }
+  }
+  return getCoreTypeOfSimpleOpOrCfImpl(op);
 }
 
 /** Determines if a value is "scalar-like" based on the following criteria:
