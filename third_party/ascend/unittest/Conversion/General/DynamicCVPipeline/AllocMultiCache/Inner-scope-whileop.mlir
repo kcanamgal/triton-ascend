@@ -6,8 +6,9 @@
 //       (legacy shape supported by hasMainLoopAttr).
 //     - setupWhileIterArgCounter is SKIPPED (bufNum==1 → no dead iter_arg).
 //     - Cross-block tensor dep still gets single-buffer treatment
-//       (single memref.alloc + single hivm.hir.copy + single to_tensor).
-//     - NO scf.if dispatch is emitted (N==1 fast path).
+//       (single memref.alloc + single bufferization.materialize_in_destination
+//       + single to_tensor).
+//     - NO arith.select / scf.if dispatch chain is emitted (N==1 fast path).
 //     - The original whileOp is preserved verbatim (no extra i32 iter_arg).
 //   We pin the buffer count to 1 via the module-level
 //   `ssbuffer.intra_buf_count` attribute so the default of 2 doesn't
@@ -19,10 +20,10 @@
 // CHECK-NOT:   memref.alloc() {{.*}}: memref<128xf32, #hivm.address_space<ub>>
 // Original whileOp do-region bb0 has only 2 block-args (no i32 counter).
 // CHECK:       ^bb0(%{{.*}}: tensor<128xf32>, %{{.*}}: i32):
-// Single producer-side hivm.hir.copy.
-// CHECK:       hivm.hir.copy ins({{.*}} : tensor<128xf32>) outs({{.*}} : memref<128xf32>)
+// Single producer-side bufferization.materialize_in_destination.
+// CHECK:       bufferization.materialize_in_destination {{.*}}: (tensor<128xf32>, memref<128xf32>) -> ()
 // Single consumer-side bufferization.to_tensor (the readback).
-// CHECK:       bufferization.to_tensor {{.*}}: memref<128xf32>
+// CHECK:       bufferization.to_tensor {{.*}}: memref<128xf32> to tensor<128xf32>
 // main_loop attribute survives on the new whileOp.
 // CHECK:       } {{.*}}ssbuffer.main_loop = 1 : i64
 
@@ -34,10 +35,12 @@
 //     - The new do-region bb0 has ONE extra block-arg compared to the input
 //       (3 block-args instead of 2; the new arg is i32).
 //     - arith.addi counter, 1 is present in the do-region for the yield.
-//     - Multi-buffer producer/consumer with scf.if dispatch works as forOp.
+//     - Multi-buffer producer uses the arith.select chain + materialize
+//       dispatch (select mode), same as the forOp path.
 //     - The counter add-1 op (and its constant-1) is relocated to the
 //       block_id of the first op that consumes the counter arg (here: the
-//       producer scf.if at block_id = 7), not its old fallback position.
+//       producer select/materialize chain at block_id = 7), not its old
+//       fallback position.
 
 // CHECK-LABEL: func.func @test_while_mainloop_bufnum_two
 // Two UB allocs (ping/pong).
@@ -45,9 +48,9 @@
 // CHECK-DAG:   memref.alloc() : memref<128xf32, #hivm.address_space<ub>>
 // WhileOp's do-region bb0 has 3 block-args now (the new i32 counter is the last one).
 // CHECK:       ^bb0(%{{.*}}: tensor<128xf32>, %{{.*}}: i32, %{{.*}}: i32):
-// Producer scf.if dispatch.
-// CHECK:       scf.if
-// CHECK:         hivm.hir.copy
+// Producer arith.select chain (replaces scf.if dispatch; refactor innerscope).
+// CHECK:       arith.select
+// CHECK:       bufferization.materialize_in_destination {{.*}}: (tensor<128xf32>, memref<128xf32>) -> ()
 // arith.addi increment for the multi-buffer counter (block_id=7, the first user's block).
 // CHECK:       %{{.+}} = arith.addi %{{.+}}, %{{.+}} {ssbuffer.block_id = 7 : i32, ssbuffer.iterCounter} : i32
 // Consumer scf.if dispatch returning tensor.
@@ -90,9 +93,9 @@
 // Multi-buffer must be emitted (proves cross-block judgment saw 8 != 12).
 // CHECK-DAG:   memref.alloc() : memref<32xf32, #hivm.address_space<ub>>
 // CHECK-DAG:   memref.alloc() : memref<32xf32, #hivm.address_space<ub>>
-// Producer-side dispatch.
-// CHECK:       scf.if
-// CHECK:         hivm.hir.copy
+// Producer-side select chain + materialize (replaces scf.if dispatch).
+// CHECK:       arith.select
+// CHECK:       bufferization.materialize_in_destination {{.*}}: (tensor<32xf32>, memref<32xf32>) -> ()
 // arith.addi increment for the multi-buffer counter (block_id=8, the first user's block).
 // CHECK:       %{{.+}} = arith.addi %{{.+}}, %{{.+}} {ssbuffer.block_id = 8 : i32, ssbuffer.iterCounter} : i32
 // Counter-aware whileOp carries ssbuffer.iterCounter alongside main_loop.
@@ -129,7 +132,7 @@
 //   the do-region, carrying the whileOp's own block_id (= 99 here, distinct
 //   from both producer and consumer). The pass now relocates them to the
 //   block_id of the first op that consumes the counter iter_arg — the
-//   producer scf.if at block_id = 5.
+//   producer select/materialize chain at block_id = 5.
 //   We assert:
 //     - The counter add-1 carries block_id = 5 (NOT 99, NOT 50).
 //     - The constant 1 used by the addi also carries block_id = 5.
@@ -140,8 +143,8 @@
 // Multi-buffer producer (two allocs at block 5) emits the dispatch.
 // CHECK-DAG:   memref.alloc() : memref<16xf32, #hivm.address_space<ub>>
 // CHECK-DAG:   memref.alloc() : memref<16xf32, #hivm.address_space<ub>>
-// CHECK:       scf.if
-// CHECK:         hivm.hir.copy
+// CHECK:       arith.select
+// CHECK:       bufferization.materialize_in_destination {{.*}}: (tensor<16xf32>, memref<16xf32>) -> ()
 // Constant 1 carrying block_id = 5 (relocated with the addi).
 // CHECK:       %{{.+}} = arith.constant {ssbuffer.block_id = 5 : i32} 1 : i32
 // Counter add-1 carries block_id = 5 and is tagged iterCounter.
