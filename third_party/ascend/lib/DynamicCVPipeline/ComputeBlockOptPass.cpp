@@ -80,6 +80,8 @@ void ComputeBlockOptPass::runOnOperation() {
   pm.addPass(createMergeCubeBlockPass());
   pm.addPass(createReorderOpsByBlockIdPass());
 
+  pm.addPass(createRelocateMemrefDeclPass());
+
   if (failed(runPipeline(pm, module))) {
     if (!CVPipeline::hasFallbackAttr(module)) {
       CVPipeline::setFallbackAttr(module, CVPipeline::ERRCODE_FAILED);
@@ -114,6 +116,7 @@ void registerComputeBlockOptPasses() {
   registerPass(createMergeSmallBlockPass);
   registerPass(createSplitIfByBlockIdPass);
   registerPass(createMergeCubeBlockPass);
+  registerPass(createRelocateMemrefDeclPass);
 }
 
 } // namespace triton
