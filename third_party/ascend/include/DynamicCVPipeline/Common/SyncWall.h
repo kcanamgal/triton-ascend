@@ -26,7 +26,7 @@
 #include "mlir/IR/Block.h"
 #include "mlir/IR/Operation.h"
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SmallVector.h"
 
 namespace mlir {
 namespace CVPipeline {
@@ -51,7 +51,11 @@ public:
 
 private:
   llvm::DenseMap<Operation *, unsigned> ordinal;
-  llvm::DenseSet<unsigned> syncPositions;
+  llvm::SmallVector<unsigned, 4> cubeSyncPositions;
+  llvm::SmallVector<unsigned, 4> vectorSyncPositions;
+  // prefixCount[i] = #syncs at positions < i
+  llvm::SmallVector<unsigned, 4> cubePrefixCount;
+  llvm::SmallVector<unsigned, 4> vectorPrefixCount;
 };
 
 } // namespace CVPipeline
