@@ -19,16 +19,73 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-#include "ascend/include/DynamicCVPipeline/PlanComputeBlock/Common.h"
+#include <algorithm>
+#include <optional>
 
 #include "DynamicCVPipeline/Common/SyncWall.h"
+#include "ascend/include/DynamicCVPipeline/PlanComputeBlock/Common.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/STLExtras.h"
 
 using namespace mlir;
 using namespace mlir::CVPipeline;
 
+namespace {
+
+llvm::SmallVector<unsigned, 4>
+buildPrefixCount(const llvm::SmallVector<unsigned, 4> &syncs, unsigned idx) {
+  llvm::SmallVector<unsigned, 4> prefix(idx + 1);
+  unsigned acc = 0;
+  for (unsigned i = 0, si = 0; i < idx; ++i) {
+    prefix[i] = acc;
+    if (si < syncs.size() && syncs[si] == i) {
+      ++acc;
+      ++si;
+    }
+  }
+  prefix[idx] = acc;
+  return prefix;
+}
+
+static llvm::DenseSet<Operation*> syncWallOps;
+
+static bool isSyncWallOp(Operation *op) {
+  if (syncWallOps.contains(op)) {
+    return true;
+  }
+  if (isExternalSyncOp(op)) {
+    syncWallOps.insert(op);
+    return true;
+  }
+  
+  // Interrupted when find inner sync wall ops, then will mark current op as sync wall op
+  auto result = op->walk([&](Operation *inner) {
+    if (isSyncWallOp(op)) {
+      syncWallOps.insert(op);
+      return WalkResult::interrupt();
+    }
+  });
+
+  return result.wasInterrupted();
+}
+
+template <typename T>
+std::optional<std::reference_wrapper<T>> getByCore(CoreType core, T &cube,
+                                                   T &vector) {
+  if (core == CoreType::CUBE_ONLY) {
+    return std::cref(cube);
+  }
+  if (core == CoreType::VECTOR_ONLY) {
+    return std::cref(vector);
+  }
+  return std::nullopt;
+}
+} // namespace
+
 SyncWall::SyncWall(Block *block) {
   unsigned idx = 0;
-  block->walk<WalkOrder::PreOrder>([&](Operation *op) {
+  llvm::SmallDenseSet<unsigned, 4> seen;
+  block->walk([&](Operation *op) {
     Operation *owner = getAncestorInBlock(op, block);
     if (owner == nullptr) {
       return;
@@ -37,9 +94,22 @@ SyncWall::SyncWall(Block *block) {
       ordinal[owner] = idx++;
     }
     if (isExternalSyncOp(op)) {
-      syncPositions.insert(ordinal[owner]);
+      unsigned pos = ordinal[owner];
+      auto coreType = CVPipeline::getOpCoreType(op);
+      if (seen.insert(pos).second) {
+        if (auto syncPositions =
+                getByCore(coreType, cubeSyncPositions, vectorSyncPositions)) {
+          syncPositions->get().push_back(pos);
+        }
+      }
+
+      // UNDETERMINED syncs barrier nothing (no matching wall), drop them.
     }
   });
+  llvm::sort(cubeSyncPositions);
+  llvm::sort(vectorSyncPositions);
+  cubePrefixCount = buildPrefixCount(cubeSyncPositions, idx);
+  vectorPrefixCount = buildPrefixCount(vectorSyncPositions, idx);
 }
 
 unsigned SyncWall::positionOf(Operation *op) const {
@@ -51,32 +121,37 @@ unsigned SyncWall::positionOf(Operation *op) const {
 }
 
 bool SyncWall::hasSyncBetween(Operation *a, Operation *b) const {
-  unsigned lo = positionOf(a);
-  unsigned hi = positionOf(b);
-  if (lo > hi) {
-    unsigned tmp = lo;
-    lo = hi;
-    hi = tmp;
+  auto aCore = CVPipeline::getOpCoreType(a);
+  if (aCore != CVPipeline::getOpCoreType(b)) {
+    return false;
   }
-  for (unsigned pos = lo + 1; pos < hi; ++pos) {
-    if (syncPositions.contains(pos)) {
-      return true;
+
+  if (auto syncs = getByCore(aCore, cubeSyncPositions, vectorSyncPositions)) {
+    const auto &syncPos = syncs->get();
+    unsigned lo = positionOf(a);
+    unsigned hi = positionOf(b);
+    if (lo > hi) {
+      std::swap(lo, hi);
     }
+    auto it = std::upper_bound(syncPos.begin(), syncPos.end(), lo);
+    return it != syncPos.end() && *it < hi;
   }
-  return false;
+  return false; // UNDETERMINED: no wall
 }
 
 unsigned SyncWall::segmentOf(Operation *op) const {
   unsigned pos = positionOf(op);
-  unsigned seg = 0;
-  for (unsigned p = 0; p < pos; ++p) {
-    if (syncPositions.contains(p)) {
-      ++seg;
+  auto core = CVPipeline::getOpCoreType(op);
+  if (auto prefix = getByCore(core, cubePrefixCount, vectorPrefixCount)) {
+    const auto &prefixCount = prefix->get();
+    if (pos < prefixCount.size()) {
+      return prefixCount[pos];
     }
   }
-  return seg;
+  return 0;
 }
 
 bool SyncWall::sameSegment(Operation *a, Operation *b) const {
-  return segmentOf(a) == segmentOf(b);
+  return CVPipeline::getOpCoreType(a) == CVPipeline::getOpCoreType(b) &&
+         segmentOf(a) == segmentOf(b);
 }
