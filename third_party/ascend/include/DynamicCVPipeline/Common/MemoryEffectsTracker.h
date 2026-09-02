@@ -64,6 +64,7 @@ private:
 
   void analyzeOp(Operation *op);
   void analyzeRegionsOf(Operation *op);
+  void buildSyncEdges();
 
   SmallVector<MemSlot *> findAliasSlots(Value v);
   ArrayRef<MemSlot *>
@@ -83,6 +84,7 @@ private:
 
   void recordEdges(Operation *op, ArrayRef<Operation *> defs,
                    ArrayRef<Operation *> preds);
+
   AliasResult queryAlias(Value lhs, Value rhs);
 
   // True when a synchronization op sits strictly between @p a and @p b in the
