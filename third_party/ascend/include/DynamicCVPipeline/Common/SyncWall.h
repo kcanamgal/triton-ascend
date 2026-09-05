@@ -26,10 +26,34 @@
 #include "mlir/IR/Block.h"
 #include "mlir/IR/Operation.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 
 namespace mlir {
 namespace CVPipeline {
+
+// Forward-declared so SyncWall can use CoreType in its interface without
+// pulling in Utils.h (which would create an include cycle via
+// MemoryEffectsTracker.h).
+enum CoreType : int;
+
+// A synchronization point: an op that is itself an external sync op OR
+// contains one in its body. position is the block-level source-order ordinal
+// (only meaningful for block-level sync points used in edge building).
+struct SyncPoint {
+  Operation *op;
+  unsigned position;
+};
+
+// Per-core-type wall data, grouped so CUBE and VECTOR share one structure.
+struct PerCoreWalls {
+  // Block-level sync points, sorted by position. Used to build edges.
+  llvm::SmallVector<SyncPoint, 4> syncPoints;
+  // prefixCount[i] = #syncPoints at positions < i -> O(1) segmentOf.
+  llvm::SmallVector<unsigned, 4> prefixCount;
+  // All-level sync-point membership (a sync op or any op containing one).
+  llvm::DenseSet<Operation *> syncSet;
+};
 
 class SyncWall {
 public:
@@ -49,13 +73,17 @@ public:
 
   bool sameSegment(Operation *a, Operation *b) const;
 
+  // Sync points of the given core type (block-level), sorted by position.
+  ArrayRef<SyncPoint> syncPointsOf(CoreType core) const;
+
+  // True iff @p op is a sync point of @p core (itself a sync op or contains
+  // one). Covers all nesting levels, not only block-level.
+  bool isSyncPoint(Operation *op, CoreType core) const;
+
 private:
   llvm::DenseMap<Operation *, unsigned> ordinal;
-  llvm::SmallVector<unsigned, 4> cubeSyncPositions;
-  llvm::SmallVector<unsigned, 4> vectorSyncPositions;
-  // prefixCount[i] = #syncs at positions < i
-  llvm::SmallVector<unsigned, 4> cubePrefixCount;
-  llvm::SmallVector<unsigned, 4> vectorPrefixCount;
+  PerCoreWalls cube;
+  PerCoreWalls vector;
 };
 
 } // namespace CVPipeline
