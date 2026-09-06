@@ -23,8 +23,6 @@
 #ifndef TRITON_ADAPTER_DYNAMIC_CV_PIPELINE_COMMON_MEMORY_EFFECTS_TRACKER_H
 #define TRITON_ADAPTER_DYNAMIC_CV_PIPELINE_COMMON_MEMORY_EFFECTS_TRACKER_H
 
-#include "DynamicCVPipeline/Common/SyncExecEdges.h"
-#include "DynamicCVPipeline/Common/SyncWall.h"
 #include "mlir/Analysis/AliasAnalysis.h"
 #include "mlir/IR/Block.h"
 #include "mlir/IR/Operation.h"
@@ -42,8 +40,8 @@ public:
   ArrayRef<Operation *> getMemDefs(Operation *op) const;
   ArrayRef<Operation *> getMemUsers(Operation *op) const;
 
-  SmallVector<Operation *> getExecBefore(Operation *op) const;
-  SmallVector<Operation *> getExecAfter(Operation *op) const;
+  ArrayRef<Operation *> getExecBefore(Operation *op) const;
+  ArrayRef<Operation *> getExecAfter(Operation *op) const;
 
   // Refine a frontOp -> backOp memory edge to the leaf front ops that cause it.
   // Returns empty when no dependency is found.
@@ -92,7 +90,6 @@ private:
   // block they share. Memory edges that cross a sync are dropped so the graph
   // never spans a barrier.
   bool isSyncSeparated(Operation *a, Operation *b);
-  SyncWall &getWall(Block *block);
 
   Operation *root;
   AliasAnalysis &aa;
@@ -105,15 +102,8 @@ private:
   DenseMap<Operation *, SmallVector<Operation *>> execBefore;
   DenseMap<Operation *, SmallVector<Operation *>> execAfter;
 
-  // Sync-op execution edges, stored independently and merged on read so the
-  // sync-edge builder never touches execBefore/execAfter.
-  SyncExecEdges syncEdges;
-
   SmallVector<std::unique_ptr<MemSlot>> slots;
   DenseMap<Value, MemSlot *> valueToSlot;
-
-  // Per-block sync walls
-  DenseMap<Block *, SyncWall> walls;
 };
 
 } // namespace CVPipeline
