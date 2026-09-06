@@ -9,105 +9,84 @@
  * furnished to do so, subject to the following conditions:
  *
  * The above copyright notice and this permission notice shall be included in
- * all copies or substantial portions of the Software![](substantial portions of the Software).
+ * all copies or substantial portions of the Software.
  *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT![](BUT NOT) LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
  * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
  * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN![](OTHER DEALINGS IN)
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
 #include <algorithm>
 
-#include "DynamicCVPipeline/Common/SyncWall.h"
+#include "ascend/include/DynamicCVPipeline/Common/SyncWall.h"
 #include "ascend/include/DynamicCVPipeline/PlanComputeBlock/Common.h"
 #include "llvm/ADT/STLExtras.h"
 
 using namespace mlir;
 using namespace mlir::CVPipeline;
 
-namespace {
-
 // prefixCount[i] = #syncPoints at positions < i, for i in [0, idx]. O(idx).
-llvm::SmallVector<unsigned, 4>
-buildPrefixCount(const llvm::SmallVector<SyncPoint, 4> &syncs, unsigned idx) {
-  llvm::SmallVector<unsigned, 4> prefix(idx + 1);
+llvm::SmallVector<unsigned>
+SyncWall::buildPrefixCount(ArrayRef<Operation *> syncs, unsigned idx) {
+  llvm::SmallVector<bool> hasSync(idx, false);
+  for (Operation *op : syncs) {
+    unsigned pos = positionOf(op);
+    if (pos < idx) {
+      hasSync[pos] = true;
+    }
+  }
+
+  llvm::SmallVector<unsigned> prefix(idx + 1);
   unsigned acc = 0;
-  for (unsigned i = 0, si = 0; i < idx; ++i) {
+  for (unsigned i = 0; i < idx; ++i) {
     prefix[i] = acc;
-    if (si < syncs.size() && syncs[si].position == i) {
+    if (hasSync[i]) {
       ++acc;
-      ++si;
     }
   }
   prefix[idx] = acc;
   return prefix;
 }
 
-} // namespace
-
 SyncWall::SyncWall(Block *block) {
-  // Phase 1: assign source-order ordinals to block-level ops (PreOrder).
   unsigned idx = 0;
-  block->walk<WalkOrder::PreOrder>([&](Operation *op) {
-    Operation *owner = getAncestorInBlock(op, block);
-    if (owner == nullptr) {
-      return;
-    }
-    if (!ordinal.contains(owner)) {
-      ordinal[owner] = idx++;
-    }
-  });
+  block->walk<WalkOrder::PreOrder>([&](Operation *op) { ordinal[op] = idx++; });
 
-  // Phase 2: identify all-level sync points via PostOrder walk. An op is a
-  // sync point if it is an external sync op or any direct child is already a
-  // sync point (PostOrder guarantees children are visited first). This
-  // propagates "contains a sync op" up to every enclosing op, so a sync point
-  // is exactly an op that is itself a sync op or contains one.
-  block->walk<WalkOrder::PostOrder>([&](Operation *op) {
-    bool isCube = isExternalSyncOp(op) &&
-                  CVPipeline::getOpCoreType(op) == CoreType::CUBE_ONLY;
-    bool isVector = isExternalSyncOp(op) &&
-                    CVPipeline::getOpCoreType(op) == CoreType::VECTOR_ONLY;
-    for (Region &region : op->getRegions()) {
-      for (Block &b : region) {
-        for (Operation &child : b) {
-          if (cube.syncSet.contains(&child)) {
-            isCube = true;
-          }
-          if (vector.syncSet.contains(&child)) {
-            isVector = true;
-          }
-        }
+  llvm::DenseSet<Operation *> cubeSyncs;
+  llvm::DenseSet<Operation *> vectorSyncs;
+
+  auto recordIfSyncPoint = [&](Operation *op,
+                               llvm::DenseSet<Operation *> &syncs) {
+    if (syncs.contains(op) || isExternalSyncOp(op)) {
+      syncs.insert(op);
+      // mark parent as sync point
+      auto *parent = op->getParentOp();
+      if (parent != nullptr && getAncestorInBlock(parent, block)) {
+        syncs.insert(parent);
       }
     }
-    if (isCube) {
-      cube.syncSet.insert(op);
-    }
-    if (isVector) {
-      vector.syncSet.insert(op);
+    return;
+  };
+
+  block->walk([&](Operation *op) {
+    auto core = CVPipeline::getOpCoreType(op);
+    if (core == CoreType::CUBE_ONLY) {
+      recordIfSyncPoint(op, cubeSyncs);
+    } else if (core == CoreType::VECTOR_ONLY) {
+      recordIfSyncPoint(op, vectorSyncs);
+    } else {
+      return;
     }
   });
 
-  // Phase 3: collect block-level sync points (same level as the ops we build
-  // edges for), sorted by source-order position.
-  for (Operation &op : *block) {
-    auto it = ordinal.find(&op);
-    if (it == ordinal.end()) {
-      continue;
-    }
-    unsigned pos = it->second;
-    if (cube.syncSet.contains(&op)) {
-      cube.syncPoints.push_back({&op, pos});
-    }
-    if (vector.syncSet.contains(&op)) {
-      vector.syncPoints.push_back({&op, pos});
-    }
-  }
-  auto byPos = [](const SyncPoint &a, const SyncPoint &b) {
-    return a.position < b.position;
+  llvm::append_range(cube.syncPoints, cubeSyncs);
+  llvm::append_range(vector.syncPoints, vectorSyncs);
+
+  auto byPos = [this](Operation *a, Operation *b) {
+    return positionOf(a) < positionOf(b);
   };
   llvm::sort(cube.syncPoints, byPos);
   llvm::sort(vector.syncPoints, byPos);
@@ -123,6 +102,39 @@ unsigned SyncWall::positionOf(Operation *op) const {
   return 0;
 }
 
+Operation *SyncWall::getPredSyncOpInSameBlock(Operation *op) const {
+  auto syncs = syncPointsOf(CVPipeline::getOpCoreType(op));
+  if (syncs.empty()) {
+    return nullptr;
+  }
+  auto it = std::upper_bound(
+      syncs.begin(), syncs.end(), positionOf(op),
+      [&, this](unsigned v, Operation *o) { return v <= positionOf(o); });
+  auto block = op->getBlock();
+  if (it != syncs.begin()) {
+    it--;
+    return (*it)->getBlock() == op->getBlock() ? *it : nullptr;
+  }
+  return nullptr;
+}
+
+Operation *SyncWall::getNextSyncOpInSameBlock(Operation *op) const {
+  auto syncs = syncPointsOf(CVPipeline::getOpCoreType(op));
+  if (syncs.empty()) {
+    return nullptr;
+  }
+  auto it = std::upper_bound(
+      syncs.begin(), syncs.end(), positionOf(op),
+      [this](unsigned v, Operation *o) { return v < positionOf(o); });
+
+  for (; it != syncs.end(); it++) {
+    if ((*it)->getBlock() == op->getBlock()) {
+      return *it;
+    }
+  }
+  return nullptr;
+}
+
 bool SyncWall::hasSyncBetween(Operation *a, Operation *b) const {
   auto aCore = CVPipeline::getOpCoreType(a);
   if (aCore != CVPipeline::getOpCoreType(b)) {
@@ -134,17 +146,16 @@ bool SyncWall::hasSyncBetween(Operation *a, Operation *b) const {
   if (lo > hi) {
     std::swap(lo, hi);
   }
-  auto it = std::upper_bound(syncs.begin(), syncs.end(), lo,
-                             [](unsigned v, const SyncPoint &s) {
-                               return v < s.position;
-                             });
-  return it != syncs.end() && it->position < hi;
+  auto it = std::upper_bound(
+      syncs.begin(), syncs.end(), lo,
+      [this](unsigned v, Operation *o) { return v < positionOf(o); });
+  return it != syncs.end() && positionOf(*it) < hi;
 }
 
 unsigned SyncWall::segmentOf(Operation *op) const {
   unsigned pos = positionOf(op);
   auto core = CVPipeline::getOpCoreType(op);
-  const llvm::SmallVector<unsigned, 4> *prefix = nullptr;
+  const llvm::SmallVector<unsigned> *prefix = nullptr;
   if (core == CoreType::CUBE_ONLY) {
     prefix = &cube.prefixCount;
   } else if (core == CoreType::VECTOR_ONLY) {
@@ -161,16 +172,24 @@ bool SyncWall::sameSegment(Operation *a, Operation *b) const {
          segmentOf(a) == segmentOf(b);
 }
 
-ArrayRef<SyncPoint> SyncWall::syncPointsOf(CoreType core) const {
+ArrayRef<Operation *> SyncWall::syncPointsOf(CoreType core) const {
   return core == CoreType::VECTOR_ONLY ? vector.syncPoints : cube.syncPoints;
 }
 
 bool SyncWall::isSyncPoint(Operation *op, CoreType core) const {
+  auto contains = [&](const llvm::SmallVector<Operation *> &syncs,
+                      Operation *op) {
+    auto it = std::lower_bound(syncs.begin(), syncs.end(), op,
+                               [&](Operation *a, Operation *b) {
+                                 return positionOf(a) < positionOf(b);
+                               });
+    return it != syncs.end() && *it == op;
+  };
   if (core == CoreType::CUBE_ONLY) {
-    return cube.syncSet.contains(op);
+    return contains(cube.syncPoints, op);
   }
   if (core == CoreType::VECTOR_ONLY) {
-    return vector.syncSet.contains(op);
+    return contains(vector.syncPoints, op);
   }
-  return false;
+  return contains(cube.syncPoints, op) || contains(vector.syncPoints, op);
 }

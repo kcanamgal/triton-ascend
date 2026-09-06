@@ -36,8 +36,6 @@
 
 #include <algorithm>
 
-#include <algorithm>
-
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallVector.h"
@@ -159,14 +157,8 @@ MemoryDependenceGraph::MemoryDependenceGraph(Operation *root, AliasAnalysis &aa)
   analyzeOp(root);
   buildSyncEdges();
 
-
   slots.clear();
   valueToSlot.clear();
-}
-
-
-static bool isBefore( Operation *a,  Operation *b) {
-  return a->isBeforeInBlock(b);
 }
 
 void MemoryDependenceGraph::buildSyncEdges() {
@@ -175,43 +167,37 @@ void MemoryDependenceGraph::buildSyncEdges() {
   }
 
   root->walk([&](Block *block) {
-    SyncWall &wall = getWall(block);
-
-    // sync 链按 core_type 分别连：相邻同 core 同步点顺序相连，
-    // 保证“只连 core_type 相同的最近”的传递性。
-    auto linkChain = [&](ArrayRef<SyncPoint> syncs) {
-      for (size_t k = 1; k < syncs.size(); ++k) {
-        syncEdges.addEdge(syncs[k - 1].op, syncs[k].op);
+    SyncWall wall(block);
+    auto addSyncEdge = [&, this](Operation *from, Operation *to) {
+      auto &before = execBefore[to];
+      if (!llvm::is_contained(before, from)) {
+        before.push_back(from);
       }
+      auto &after = execAfter[from];
+      if (!llvm::is_contained(after, to)) {
+        after.push_back(to);
+      }
+      LOG_DEBUG("Add sync edge: " << *from << " -> " << *to);
     };
-    linkChain(wall.syncPointsOf(CoreType::CUBE_ONLY));
-    linkChain(wall.syncPointsOf(CoreType::VECTOR_ONLY));
 
-    for (Operation &rOp : *block) {
-      Operation *R = &rOp;
-      if (!isTensorComputeOp(R) && !isStoreLike(R)) {
+    for (auto &op : *block) {
+      auto coreType = CVPipeline::getOpCoreType(&op);
+      if (coreType != CoreType::CUBE_ONLY &&
+          coreType != CoreType::VECTOR_ONLY) {
         continue;
       }
-      auto cR = CVPipeline::getOpCoreType(R);
-      if (cR != CoreType::CUBE_ONLY && cR != CoreType::VECTOR_ONLY) {
-        continue; // UNDETERMINED: no matching wall
-      }
-      auto syncs = wall.syncPointsOf(cR);
+      auto syncs = wall.syncPointsOf(coreType);
       if (syncs.empty()) {
         continue;
       }
-      unsigned posR = wall.positionOf(R);
+      auto predSync = wall.getPredSyncOpInSameBlock(&op);
+      auto nextSync = wall.getNextSyncOpInSameBlock(&op);
 
-      // 后最近同 core 同步点（第一个 position > posR）；prev = next - 1 为前最近。
-      auto next = std::upper_bound(
-          syncs.begin(), syncs.end(), posR,
-          [](unsigned v, const SyncPoint &s) { return v < s.position; });
-
-      if (next != syncs.begin()) { // 前最近 P：P -> R
-        syncEdges.addEdge((next - 1)->op, R);
+      if (predSync != nullptr) {
+        addSyncEdge(predSync, &op);
       }
-      if (next != syncs.end()) { // 后最近 N：R -> N
-        syncEdges.addEdge(R, next->op);
+      if (nextSync != nullptr) {
+        addSyncEdge(&op, nextSync);
       }
     }
   });
@@ -232,33 +218,21 @@ ArrayRef<Operation *> MemoryDependenceGraph::getMemUsers(Operation *op) const {
   return it->second;
 }
 
-SmallVector<Operation *>
+ArrayRef<Operation *>
 MemoryDependenceGraph::getExecBefore(Operation *op) const {
-  SmallVector<Operation *> result;
   auto it = execBefore.find(op);
-  if (it != execBefore.end()) {
-    result = it->second;
+  if (it == execBefore.end()) {
+    return {};
   }
-  for (Operation *p : syncEdges.getBefore(op)) {
-    if (!llvm::is_contained(result, p)) {
-      result.push_back(p);
-    }
-  }
-  return result;
+  return it->second;
 }
 
-SmallVector<Operation *> MemoryDependenceGraph::getExecAfter(Operation *op) const {
-  SmallVector<Operation *> result;
+ArrayRef<Operation *> MemoryDependenceGraph::getExecAfter(Operation *op) const {
   auto it = execAfter.find(op);
-  if (it != execAfter.end()) {
-    result = it->second;
+  if (it == execAfter.end()) {
+    return {};
   }
-  for (Operation *p : syncEdges.getAfter(op)) {
-    if (!llvm::is_contained(result, p)) {
-      result.push_back(p);
-    }
-  }
-  return result;
+  return it->second;
 }
 
 SmallVector<Operation *>
