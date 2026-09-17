@@ -62,23 +62,25 @@ static LogicalResult collectArgIndexToBlockIds(
       continue;
     int blockId = blockIdAttr.getInt();
 
-    for (OpOperand &operand : op.getOpOperands()) {
-      Value v = operand.get();
-      for (BlockArgument iterArg : body->getArguments()) {
-        int argIdx = iterArg.getArgNumber();
-        if (argIdx < (int)ivOffset) {
-          // scf.for's IV at block arg 0 — never an iter_arg.
-          continue;
-        }
-        // Skip tensor-type iter_args, only process scalar and index types
-        if (mlir::isa<TensorType>(iterArg.getType())) {
-          continue;
-        }
-        if (v == iterArg) {
-          argIndexToBlockIds[argIdx - (int)ivOffset].insert(blockId);
+    op.walk([&](Operation *nestedOp) {
+      for (OpOperand &operand : nestedOp->getOpOperands()) {
+        Value v = operand.get();
+        for (BlockArgument iterArg : body->getArguments()) {
+          int argIdx = iterArg.getArgNumber();
+          if (argIdx < (int)ivOffset) {
+            // scf.for's IV at block arg 0 — never an iter_arg.
+            continue;
+          }
+          // Skip tensor-type iter_args, only process scalar and index types
+          if (mlir::isa<TensorType>(iterArg.getType())) {
+            continue;
+          }
+          if (v == iterArg) {
+            argIndexToBlockIds[argIdx - (int)ivOffset].insert(blockId);
+          }
         }
       }
-    }
+    });
   }
   return success();
 }
@@ -142,13 +144,15 @@ static void collectChainOps(Operation *loopOp, Operation *compOp,
       continue;
     chainOps.insert(op);
 
-    for (Value operand : op->getOperands()) {
-      if (auto *defOp = operand.getDefiningOp()) {
-        if (defOp->getParentOp() == loopOp && !chainOps.contains(defOp)) {
-          worklist.push_back(defOp);
+    op->walk([&](Operation *nestOp) {
+      for (Value operand : nestOp->getOperands()) {
+        if (auto *defOp = operand.getDefiningOp()) {
+          if (defOp->getParentOp() == loopOp && !chainOps.contains(defOp)) {
+            worklist.push_back(defOp);
+          }
         }
       }
-    }
+    });
   }
 }
 
@@ -235,15 +239,17 @@ static LogicalResult replaceIterArgsInBlock(SharedArgInfo &info,
     if (!blockIdAttr || blockIdAttr.getInt() != info.nonOwnerBlockId)
       continue;
 
-    for (unsigned i = 0; i < op.getNumOperands(); ++i) {
-      Value operand = op.getOperand(i);
-      if (argRemapping.contains(operand)) {
-        Value newVal = argRemapping.lookup(operand);
-        op.setOperand(i, newVal);
-        op.setAttr(CVPipeline::kArg,
-                   cloneBuilder.getI32IntegerAttr(info.argIndex));
+    op.walk([&](Operation *nestedOp) {
+      for (unsigned i = 0; i < nestedOp->getNumOperands(); ++i) {
+        Value operand = nestedOp->getOperand(i);
+        if (argRemapping.contains(operand)) {
+          Value newVal = argRemapping.lookup(operand);
+          nestedOp->setOperand(i, newVal);
+          nestedOp->setAttr(CVPipeline::kArg,
+                            cloneBuilder.getI32IntegerAttr(info.argIndex));
+        }
       }
-    }
+    });
   }
   return success();
 }
