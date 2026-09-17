@@ -56,31 +56,22 @@ static LogicalResult collectArgIndexToBlockIds(
     return failure();
   }
 
-  for (Operation &op : body->without_terminator()) {
-    auto blockIdAttr = op.getAttrOfType<IntegerAttr>(CVPipeline::kBlockId);
-    if (!blockIdAttr)
+  for (auto iterArg : body->getArguments()) {
+    int argIdx = iterArg.getArgNumber();
+    if (argIdx < (int)ivOffset) {
+      // scf.for's IV at block arg 0 — never an iter_arg.
       continue;
-    int blockId = blockIdAttr.getInt();
-
-    op.walk([&](Operation *nestedOp) {
-      for (OpOperand &operand : nestedOp->getOpOperands()) {
-        Value v = operand.get();
-        for (BlockArgument iterArg : body->getArguments()) {
-          int argIdx = iterArg.getArgNumber();
-          if (argIdx < (int)ivOffset) {
-            // scf.for's IV at block arg 0 — never an iter_arg.
-            continue;
-          }
-          // Skip tensor-type iter_args, only process scalar and index types
-          if (mlir::isa<TensorType>(iterArg.getType())) {
-            continue;
-          }
-          if (v == iterArg) {
-            argIndexToBlockIds[argIdx - (int)ivOffset].insert(blockId);
-          }
-        }
+    }
+    // Skip tensor-type iter_args, only process scalar and index types
+    if (mlir::isa<TensorType>(iterArg.getType())) {
+      continue;
+    }
+    for (auto &use : iterArg.getUses()) {
+      Operation *owner = use.getOwner();
+      if (auto blockId = getLoopDirectChildBlockId(owner)) {
+        argIndexToBlockIds[argIdx - (int)ivOffset].insert(*blockId);
       }
-    });
+    }
   }
   return success();
 }
@@ -234,23 +225,26 @@ static LogicalResult replaceIterArgsInBlock(SharedArgInfo &info,
                                             Block *newBlock,
                                             IRMapping &argRemapping,
                                             OpBuilder &cloneBuilder) {
-  for (Operation &op : newBlock->without_terminator()) {
-    auto blockIdAttr = op.getAttrOfType<IntegerAttr>(CVPipeline::kBlockId);
-    if (!blockIdAttr || blockIdAttr.getInt() != info.nonOwnerBlockId)
+  for (auto arg : newBlock->getArguments()) {
+    if (!argRemapping.contains(arg)) {
       continue;
+    }
+    Value newVal = argRemapping.lookup(arg);
 
-    op.walk([&](Operation *nestedOp) {
-      for (unsigned i = 0; i < nestedOp->getNumOperands(); ++i) {
-        Value operand = nestedOp->getOperand(i);
-        if (argRemapping.contains(operand)) {
-          Value newVal = argRemapping.lookup(operand);
-          nestedOp->setOperand(i, newVal);
-          nestedOp->setAttr(CVPipeline::kArg,
-                            cloneBuilder.getI32IntegerAttr(info.argIndex));
-        }
+    SmallVector<OpOperand *, 8> usesToReplace;
+    for (OpOperand &use : arg.getUses()) {
+      auto blockId = getLoopDirectChildBlockId(use.getOwner());
+      if (blockId && *blockId == info.nonOwnerBlockId) {
+        usesToReplace.push_back(&use);
       }
-    });
+    }
+    for (OpOperand *use : usesToReplace) {
+      use->set(newVal);
+      use->getOwner()->setAttr(CVPipeline::kArg,
+                               cloneBuilder.getI32IntegerAttr(info.argIndex));
+    }
   }
+
   return success();
 }
 
