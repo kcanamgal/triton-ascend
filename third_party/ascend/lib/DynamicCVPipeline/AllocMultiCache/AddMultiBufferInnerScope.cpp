@@ -543,8 +543,8 @@ insertProducerLogic(OpBuilder &builder, Value depVal,
 
     // sel_0 = buf[0]                          ; default for remsi==0
     // sel_i = arith.select(remsi == i, buf[i], sel_(i-1))   for i in [1, N-1]
-    Value selectedBuf = buffers[0].second;
-    for (int i = 1; i < N; ++i) {
+    Value selectedBuf = buffers[N - 1].second;
+    for (int i = N - 2; i >= 0; --i) {
       Value iVal = selBuilder.create<mlir::arith::ConstantIntOp>(loc, i, 32);
       Value cmp = selBuilder.create<mlir::arith::CmpIOp>(
           loc, mlir::arith::CmpIPredicate::eq, bufIdx, iVal);
@@ -1048,6 +1048,49 @@ processTensorDependencies(const MainLoop &loop,
   return 0;
 }
 
+// Returns true and fills `alignedShape` when the rotation buffer for
+// `shapedType` must be allocated with a 32B-aligned last dimension, i.e. the
+// original last dim is not a multiple of the elements that fill 32 bytes.
+// When this returns false, `alignedShape` is left untouched and the original
+// shape must be used as-is.
+//
+// The 32B alignment unit matches the UB stride alignment convention used by
+// UBOverflowChecker (STRIDE_ALIGN_BYTES / ALIGN_UNIT_BITS).
+//
+// The aligned base is only the *storage*; callers must expose the usable
+// rotation buffer as a non-aligned subview of the original shape so that
+// downstream tensor-type reconstruction (derived from buffers[].second) stays
+// correct.
+static bool getAlignedBufferShape(ShapedType shapedType,
+                                  SmallVector<int64_t> &alignedShape) {
+  constexpr int64_t kAlignBytes = 32;
+
+  if (!shapedType.hasStaticShape() || shapedType.getRank() < 1)
+    return false;
+
+  Type elemType = shapedType.getElementType();
+  if (!elemType.isIntOrFloat())
+    return false;
+  unsigned elemBits = elemType.getIntOrFloatBitWidth();
+  if (elemBits == 0 || elemBits % 8 != 0)
+    return false;
+
+  int64_t elemBytes = elemBits / 8;
+  // Element itself already covers (or exceeds) 32B: nothing to pad.
+  if (elemBytes >= kAlignBytes || kAlignBytes % elemBytes != 0)
+    return false;
+
+  int64_t alignUnit = kAlignBytes / elemBytes; // elements per 32B
+  ArrayRef<int64_t> shape = shapedType.getShape();
+  int64_t lastDim = shape.back();
+  if (lastDim <= 0 || lastDim % alignUnit == 0)
+    return false;
+
+  alignedShape.assign(shape.begin(), shape.end());
+  alignedShape.back() = ((lastDim + alignUnit - 1) / alignUnit) * alignUnit;
+  return true;
+}
+
 static BufferMap insertBuffersBeforeLoop(const MainLoop &loop,
                                          SmallVector<Value> &valueList,
                                          OpBuilder &builder, int groupId) {
@@ -1065,20 +1108,46 @@ static BufferMap insertBuffersBeforeLoop(const MainLoop &loop,
     Type elemType = shapedType.getElementType();
     AddressSpace addrSpace = AddressSpace::UB;
 
+    // If the last dim is not 32B aligned, the rotation buffers use an aligned
+    // base allocation and expose the original shape via a non-aligned subview.
+    // The subview keeps the original shape/element type so downstream
+    // tensor-type reconstruction from buffers[].second stays correct.
+    SmallVector<int64_t> alignedShape;
+    bool needsAlignFix = getAlignedBufferShape(shapedType, alignedShape);
+    ArrayRef<int64_t> baseShape =
+        needsAlignFix ? ArrayRef<int64_t>(alignedShape) : shapedType.getShape();
+
     SmallVector<BufferPair> buffers;
     for (int i = 0; i < bufNum; ++i) {
-      MemRefType memrefType = MemRefType::get(
-          shapedType.getShape(), elemType, MemRefLayoutAttrInterface{},
+      MemRefType allocType = MemRefType::get(
+          baseShape, elemType, MemRefLayoutAttrInterface{},
           AddressSpaceAttr::get(insertedBuffers.getContext(), addrSpace));
-
       auto allocOp =
-          insertedBuffers.create<memref::AllocOp>(loop.getLoc(), memrefType);
+          insertedBuffers.create<memref::AllocOp>(loop.getLoc(), allocType);
 
-      auto genericType = MemRefType::get(shapedType.getShape(), elemType,
-                                         MemRefLayoutAttrInterface{}, 0u);
+      Value rotationBuf = allocOp.getResult();
+      if (needsAlignFix) {
+        SmallVector<OpFoldResult> offsets;
+        SmallVector<OpFoldResult> sizes;
+        SmallVector<OpFoldResult> strides;
+        for (int64_t dim : shapedType.getShape()) {
+          offsets.push_back(insertedBuffers.getIndexAttr(0));
+          sizes.push_back(insertedBuffers.getIndexAttr(dim));
+          strides.push_back(insertedBuffers.getIndexAttr(1));
+        }
+        auto subOp = insertedBuffers.create<memref::SubViewOp>(
+            loop.getLoc(), allocOp.getResult(), offsets, sizes, strides);
+        rotationBuf = subOp.getResult();
+      }
+
+      auto rotMemRefType = cast<MemRefType>(rotationBuf.getType());
+      auto genericType =
+          MemRefType::get(rotMemRefType.getShape(),
+                          rotMemRefType.getElementType(),
+                          rotMemRefType.getLayout(), 0u);
 
       auto casted = insertedBuffers.create<memref::MemorySpaceCastOp>(
-          loop.getLoc(), genericType, allocOp.getResult());
+          loop.getLoc(), genericType, rotationBuf);
 
       buffers.push_back({casted.getResult(), casted.getResult()});
     }
