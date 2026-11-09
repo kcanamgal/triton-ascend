@@ -430,10 +430,11 @@ static void printDependentMaps(ControlFlowConditionInfo *info) {
   }
 }
 
-// Compute producer buffer counts (max map size) from cross/intra-core maps;
-// falls back to BufferCountManager IntraCore when the intra-core map is empty.
+// Compute producer buffer counts. Cross-core uses the max map size; intra-core
+// is read from the module's ssbuffer.intra_buf_count attribute, falling back to
+// BufferCountManager's default-initialized value when the attribute is absent.
 static void computeProducerBufferCount(ControlFlowConditionInfo *info,
-                                        ModuleOp module) {
+                                       ModuleOp module) {
   // Get cross-core buffer count (max size in the map)
   info->crossCoreBufferCount = 0;
   for (auto &entry : info->crossCoreDependentMap) {
@@ -446,9 +447,21 @@ static void computeProducerBufferCount(ControlFlowConditionInfo *info,
 
   // Get intra-core buffer count from module attribute
   int intraBufCount = getIntraCoreBufferCount(module);
+  if (intraBufCount == -1) {
+    // The attribute is absent (e.g. no BufferCountManager has been constructed
+    // on this module yet). BufferCountManager's constructor materializes the
+    // default attributes, so reading it back yields a valid count instead of
+    // leaving intraCoreBufferCount at -1 (which would silently disable the
+    // flowOpt path and force collectIntraCoreOutputConditions to fail).
+    LDBG("ssbuffer.intra_buf_count is absent, falling back to "
+         "BufferCountManager default");
+    BufferCountManager bufferCountMgr(module);
+    intraBufCount = bufferCountMgr.getBufferCountByType(
+        BufferCountManager::DepType::IntraCore);
+  }
   info->intraCoreBufferCount = intraBufCount;
   LDBG("Intra-core buffer count (from module attribute): "
-        << info->intraCoreBufferCount);
+       << info->intraCoreBufferCount);
 }
 
 // Add an edge to ifBlockDAG if it is not already present
