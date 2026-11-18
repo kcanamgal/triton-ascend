@@ -51,6 +51,7 @@
 
 #include "ascend/include/DynamicCVPipeline/AddControlFlowCondition.h"
 #include "ascend/include/DynamicCVPipeline/AddControlFlowCondition/OuterEventSchedule.h"
+#include "ascend/include/DynamicCVPipeline/Common/BufferCountManager.h"
 #include "ascend/include/DynamicCVPipeline/Common/LoopScheduleAttrs.h"
 #include "ascend/include/DynamicCVPipeline/Common/SSBufferManager.h"
 #include "ascend/include/DynamicCVPipeline/Common/Utils.h"
@@ -992,8 +993,12 @@ int UpdateConditionInfoPassLegacy::collectIntraCoreOutputConditions(
                         outputGroups) == UPDATE_CONDITION_INFO_FAILED) {
     return UPDATE_CONDITION_INFO_FAILED;
   }
+  BufferCountManager bcm(module);
+  int intraBufCount =
+      bcm.getBufferCountByType(BufferCountManager::DepType::IntraCore);
+
   for (auto &group : outputGroups) {
-    int size = group.outputs.size();
+    int size = intraBufCount;
     Value limitVal =
         builder.create<arith::ConstantIntOp>(loc, size, CONST_INT_TYPE);
     for (Value var : group.inputVars) {
